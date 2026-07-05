@@ -66,7 +66,8 @@ CArchiveUpdateCallback::CArchiveUpdateCallback():
     StoreNtSecurity(false),
     StoreHardLinks(false),
     StoreSymLinks(false),
-    
+    PreserveAbsoluteSymLinks(false),
+
    #ifndef _WIN32
     StoreOwnerId(false),
     StoreOwnerName(false),
@@ -405,7 +406,10 @@ Z7_COM7F_IMF(CArchiveUpdateCallback::GetProperty(UInt32 index, PROPID propID, PR
                    NName::IsAbsolutePath(path)))
               {
                 // (path) is abolute path or relative to root: "\path"
-                // we try to convert (path) to relative path for writing to archive.
+                // we try to convert (path) to relative path for writing to archive,
+                // unless PreserveAbsoluteSymLinks asks to keep it literal (in which
+                // case we still need (fullPath) below to qualify a root-relative
+                // "\path" with its actual drive prefix).
                 const FString phyPath = DirItems->GetPhyPath((unsigned)up.DirIndex);
                 FString fullPath;
                 if (NDir::MyGetFullPathName(phyPath, fullPath))
@@ -425,7 +429,8 @@ Z7_COM7F_IMF(CArchiveUpdateCallback::GetProperty(UInt32 index, PROPID propID, PR
                     }
                   }
                 }
-                path = GetRelativePath(path, fs2us(fullPath), isWSL);
+                if (!PreserveAbsoluteSymLinks)
+                  path = GetRelativePath(path, fs2us(fullPath), isWSL);
               }
 #if WCHAR_PATH_SEPARATOR != L'/'
               // 7-Zip's TAR handler in Windows replaces windows slashes to linux slashes.

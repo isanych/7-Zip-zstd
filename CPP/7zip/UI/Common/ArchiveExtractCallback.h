@@ -67,6 +67,11 @@ struct CExtractNtOptions
 
   unsigned SymLinks_DangerousLevel;
 
+  // when set, absolute symlink targets are recreated literally instead of
+  // being rebased under the extraction root. Set unconditionally in Main.cpp
+  // so links to files outside the archive round-trip by default.
+  bool SymLinks_PreserveAbsolute;
+
   UInt64 MemLimit;
 
   CExtractNtOptions():
@@ -76,6 +81,7 @@ struct CExtractNtOptions
       PreserveATime(false),
       OpenShareForWrite(false),
       SymLinks_DangerousLevel(5),
+      SymLinks_PreserveAbsolute(false),
       MemLimit((UInt64)(Int64)-1)
   {
     SymLinks.Val = true;
@@ -201,6 +207,11 @@ struct CLinkInfo
     //  if (isRelative == true ), then (LinkPath) is relative to current item
   bool isWindowsPath;
   UString LinkPath;
+  // the absolute-path prefix (root separator, drive letter, or UNC share)
+  // that Remove_AbsPathPrefixes() stripped from LinkPath, if any. Used to
+  // reconstruct the real absolute target when SymLinks_PreserveAbsolute
+  // is set -- see SetLink2() in ArchiveExtractCallback.cpp.
+  UString AbsPrefix;
 
   bool Is_HardLink() const { return LinkType == k_LinkType_HardLink; }
   bool Is_AnySymLink() const { return LinkType != k_LinkType_HardLink; }
@@ -219,6 +230,7 @@ struct CLinkInfo
     isRelative = false;
     isWindowsPath = false;
     LinkPath.Empty();
+    AbsPrefix.Empty();
   }
 
   bool Parse_from_WindowsReparseData(const Byte *data, size_t dataSize);

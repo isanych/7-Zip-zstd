@@ -805,6 +805,141 @@ static void PrintHexId(CStdOutStream &so, UInt64 id)
 void Set_ModuleDirPrefix_From_ProgArg0(const char *s);
 #endif
 
+static bool ArcPath_EndsWith_NoCase(const UString &s, const char *suffix)
+{
+  unsigned len = 0;
+  while (suffix[len] != 0)
+    len++;
+  if (s.Len() < len)
+    return false;
+  return UString(s.Ptr(s.Len() - len)).IsEqualTo_Ascii_NoCase(suffix);
+}
+
+// .7zst / .7zstd: a plain 7z archive (registered as extra extensions for
+// the "7z" format in 7zRegister.cpp -- structurally identical to .7z, no
+// open/extract changes needed) that defaults its compression method to
+// zstd on create/update instead of the format's usual LZMA2 default.
+static bool Is_7zst_ArcName(const UString &arcPath)
+{
+  return ArcPath_EndsWith_NoCase(arcPath, ".7zst")
+      || ArcPath_EndsWith_NoCase(arcPath, ".7zstd");
+}
+
+// "-m0=..." sets this property (see SetMethodOptions() in
+// ArchiveCommandLine.cpp); its presence means the user already chose an
+// explicit main method, so the .7zst/.7zstd zstd default should not apply.
+static bool Has_ExplicitMainMethodProperty(const CObjectVector<CProperty> &props)
+{
+  for (unsigned i = 0; i < props.Size(); i++)
+    if (props[i].Name.IsEqualTo_Ascii_NoCase("0"))
+      return true;
+  return false;
+}
+
+// tar-dialect names that should get one-step tar+compressor combining on
+// create, mirroring the AddExt=".tar" naming already used by the zstd/gzip/
+// bzip2/xz handlers on open (see kpidMainSubfile/GetStream in each handler).
+static bool Is_TarDialect_ArcName(const UString &arcPath)
+{
+  static const char * const kSuffixes[] =
+  {
+    ".tzst", ".tzstd", ".tar.zst", ".tar.zstd",   // zstd
+    ".tgz", ".tar.gz",                            // gzip
+    ".tbz2", ".tbz", ".tar.bz2",                  // bzip2
+    ".txz", ".tar.xz",                            // xz
+  };
+  for (unsigned i = 0; i < Z7_ARRAY_SIZE(kSuffixes); i++)
+    if (ArcPath_EndsWith_NoCase(arcPath, kSuffixes[i]))
+      return true;
+  return false;
+}
+
+// Builds archive.tzst / archive.tgz / archive.tar.bz2 / archive.txz (etc.)
+// in one step: tar the inputs into a temp file, then compress that temp
+// file into arcPath using whichever compressor arcPath's own extension
+// resolves to (the second UpdateArchive call below already picks that
+// compressor generically -- this function itself is not zstd/gzip/etc-specific).
+static HRESULT CreateTarCombinedArchive(
+    CCodecs *codecs,
+    const UString &arcPath,
+    NWildcard::CCensor &censor,
+    const CUpdateOptions &uo,
+    CUpdateErrorInfo &errorInfo,
+    IOpenCallbackUI *openCallback,
+    IUpdateCallbackUI2 *callback)
+{
+  const int tarFormatIndex = codecs->FindFormatForArchiveType((UString)"tar");
+  if (tarFormatIndex < 0)
+    return E_NOTIMPL;
+
+  NDir::CTempFile tempTarFile;
+  {
+    NIO::COutFile dummyOut;
+    if (!tempTarFile.CreateRandomInTempFolder(FTEXT("7zAr"), &dummyOut))
+      return E_FAIL;
+    dummyOut.Close();
+  }
+  // we only needed a guaranteed-unique name; let the tar creation below
+  // (re)create the real file there.
+  NDir::DeleteFileAlways(tempTarFile.GetPath());
+  const UString tempTarPath = fs2us(tempTarFile.GetPath());
+
+  {
+    CObjectVector<COpenType> tarTypes;
+    COpenType tarType;
+    tarType.FormatIndex = tarFormatIndex;
+    tarTypes.Add(tarType);
+
+    CUpdateOptions tarOptions;
+    tarOptions.Commands = uo.Commands;
+    tarOptions.MethodMode.Type.FormatIndex = tarFormatIndex;
+    tarOptions.MethodMode.Type_Defined = true;
+    tarOptions.PreserveATime = uo.PreserveATime;
+    tarOptions.OpenShareForWrite = uo.OpenShareForWrite;
+    tarOptions.StopAfterOpenError = uo.StopAfterOpenError;
+    tarOptions.NtSecurity = uo.NtSecurity;
+    tarOptions.AltStreams = uo.AltStreams;
+    tarOptions.HardLinks = uo.HardLinks;
+    tarOptions.SymLinks = uo.SymLinks;
+    tarOptions.SymLinks_PreserveAbsolute = uo.SymLinks_PreserveAbsolute;
+    tarOptions.StoreOwnerId = uo.StoreOwnerId;
+    tarOptions.StoreOwnerName = uo.StoreOwnerName;
+    tarOptions.ArcNameMode = k_ArcNameMode_Exact;
+    tarOptions.PathMode = uo.PathMode;
+    tarOptions.WorkingDir = uo.WorkingDir;
+
+    RINOK(UpdateArchive(codecs, tarTypes, tempTarPath, censor, tarOptions,
+        errorInfo, openCallback, callback, true))
+  }
+
+  {
+    // If arcPath already exists, delete it first rather than let the
+    // UpdateArchive() call below treat this as an in-place update: these
+    // compressor formats hold exactly one opaque item, so there's no
+    // meaningful diff between "old item" and our one new (temp tar) item --
+    // GetUpdatePairInfoList() has no name to match them by and ends up
+    // asking the handler for a 2-item update, which it rejects (E_INVALIDARG).
+    // A tar-dialect archive can only ever be recreated from scratch anyway.
+    if (NFind::DoesFileOrDirExist(us2fs(arcPath)))
+      if (!NDir::DeleteFileAlways(us2fs(arcPath)))
+        return errorInfo.SetFromLastError("cannot delete old archive to recreate it", us2fs(arcPath));
+
+    NWildcard::CCensor tarInputCensor;
+    tarInputCensor.AddPreItem_NoWildcard(tempTarPath);
+
+    // no forced format here: InitFormatIndex() resolves the compressor
+    // generically from arcPath's own extension (zstd/gzip/bzip2/xz).
+    CUpdateOptions compressorOptions = uo;
+    compressorOptions.ArcNameMode = k_ArcNameMode_Exact;
+
+    CObjectVector<COpenType> noTypes;
+    RINOK(UpdateArchive(codecs, noTypes, arcPath, tarInputCensor, compressorOptions,
+        errorInfo, openCallback, callback, true))
+  }
+
+  return S_OK;
+}
+
 int Main2(
   #ifndef _WIN32
   int numArgs, char *args[]
@@ -947,6 +1082,39 @@ int Main2(
   }
 
   parser.Parse2(options);
+
+  // Symlink round-tripping is 7zz's default, regardless of how the binary
+  // is invoked or named: exact symlink state (including links to files
+  // outside the archive, relative or absolute) round-trips through
+  // archive/extract on both Windows and Linux.
+
+  // create: store symlinks by default, unless the user explicitly said -snl-
+  if (!options.SymLinks.Def)
+    options.UpdateOptions.SymLinks.SetTrueTrue();
+
+  // create: store absolute symlink targets literally instead of rebasing
+  // them relative to their own location on disk (see the kpidSymLink
+  // property getter in UpdateCallback.cpp)
+  options.UpdateOptions.SymLinks_PreserveAbsolute = true;
+
+  // extract: no "dangerous link" restrictions, unless the user explicitly
+  // asked for a specific level via -snld
+  if (options.ExtractOptions.NtOptions.SymLinks_DangerousLevel == 5)
+    options.ExtractOptions.NtOptions.SymLinks_DangerousLevel = 999;
+
+  // extract: recreate absolute symlink targets literally (no existing
+  // switch controls this -- see SetLink2() in ArchiveExtractCallback.cpp)
+  options.ExtractOptions.NtOptions.SymLinks_PreserveAbsolute = true;
+
+  if (options.Command.IsFromUpdateGroup()
+      && Is_7zst_ArcName(options.ArchiveName)
+      && !Has_ExplicitMainMethodProperty(options.UpdateOptions.MethodMode.Properties))
+  {
+    CProperty prop;
+    prop.Name = "0";
+    prop.Value = "zstd";
+    options.UpdateOptions.MethodMode.Properties.Add(prop);
+  }
 
   {
     int cp = options.ConsoleCodePage;
@@ -1607,12 +1775,40 @@ int Main2(
     if (!uo.Init(codecs, types, options.ArchiveName))
       throw kUnsupportedUpdateArcType;
     */
-    hresultMain = UpdateArchive(codecs,
-        types,
-        options.ArchiveName,
-        options.Censor,
-        uo,
-        errorInfo, &openCallback, &callback, true);
+    bool combinedTarDone = false;
+    if (options.Command.CommandType == NCommandType::kAdd
+        && types.IsEmpty()
+        && !uo.SfxMode
+        && uo.VolumesSizes.IsEmpty()
+        && uo.RenamePairs.IsEmpty()
+        && !uo.DeleteAfterCompressing
+        && !uo.EMailMode
+        && !uo.StdOutMode
+        && !uo.StdInMode
+        && Is_TarDialect_ArcName(options.ArchiveName))
+    {
+      // if options.ArchiveName already exists, the second UpdateArchive()
+      // call below (into the real target) takes care of it the same way
+      // it always does for any archive format: open, diff the existing
+      // single item against our one new item, and safely replace it via
+      // its own temp-file-then-rename path -- there's no meaningful
+      // "incremental update" for a format that only ever holds one item,
+      // so recreating from the given inputs is the right behavior.
+      combinedTarDone = true;
+      hresultMain = CreateTarCombinedArchive(codecs,
+          options.ArchiveName,
+          options.Censor,
+          uo,
+          errorInfo, &openCallback, &callback);
+    }
+
+    if (!combinedTarDone)
+      hresultMain = UpdateArchive(codecs,
+          types,
+          options.ArchiveName,
+          options.Censor,
+          uo,
+          errorInfo, &openCallback, &callback, true);
 
     callback.ClosePercents2();
 

@@ -208,7 +208,17 @@ bool CUpdateOptions::InitFormatIndex(const CCodecs *codecs,
     {
       MethodMode.Type.FormatIndex = codecs->FindFormatForArchiveName(arcPath);
       if (MethodMode.Type.FormatIndex >= 0)
+      {
         MethodMode.Type_Defined = true;
+        // this Type expresses "the archive's own format", not a request to
+        // recursively re-open nested content as that same format again --
+        // CArchiveLink::Open() (OpenArchive.cpp) reuses types[0] for every
+        // recursion level past the explicit types array unless Recursive
+        // is false, which would otherwise force a tar-dialect compressor's
+        // own format onto its (non-matching) decompressed tar content when
+        // re-opening an existing archive for update.
+        MethodMode.Type.Recursive = false;
+      }
     }
   }
   return true;
@@ -638,6 +648,7 @@ static HRESULT Compress(
   updateCallbackSpec->StoreNtSecurity = options.NtSecurity.Val;
   updateCallbackSpec->StoreHardLinks = options.HardLinks.Val;
   updateCallbackSpec->StoreSymLinks = options.SymLinks.Val;
+  updateCallbackSpec->PreserveAbsoluteSymLinks = options.SymLinks_PreserveAbsolute;
   updateCallbackSpec->StoreOwnerName = options.StoreOwnerName.Val;
   updateCallbackSpec->StoreOwnerId = options.StoreOwnerId.Val;
 

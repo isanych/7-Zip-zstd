@@ -2222,7 +2222,22 @@ static HRESULT SetLink2(const CArchiveExtractCallback &callback,
   }
 
   FString target; // target path that will be stored to link field
-  if (link.Is_HardLink() /* || link.IsCopyLink */ || !link.isRelative)
+  if (!link.Is_HardLink() && !link.isRelative && callback._ntOptions.SymLinks_PreserveAbsolute)
+  {
+    // store the archived absolute symlink target literally instead of
+    // rebasing it under the extraction root, so links to files outside
+    // the archive round-trip. Remove_AbsPathPrefixes() stripped the
+    // leading prefix (root separator, drive letter, or UNC share) from
+    // LinkPath before we get here but saved it in AbsPrefix, so we put
+    // back the real prefix instead of assuming a generic root separator.
+    target.Empty();
+    if (!link.AbsPrefix.IsEmpty())
+      target += us2fs(link.AbsPrefix);
+    else
+      target += FCHAR_PATH_SEPARATOR;
+    target += us2fs(link.LinkPath);
+  }
+  else if (link.Is_HardLink() /* || link.IsCopyLink */ || !link.isRelative)
   {
     // isRelative == false
     // all hard links and absolute symbolic links
@@ -2434,6 +2449,7 @@ void CLinkInfo::Remove_AbsPathPrefixes()
       n = 1;
     }
     isRelative = false; // (LinkPath) will be treated as relative to root folder of archive
+    AbsPrefix += LinkPath.Left(n); // remember the stripped prefix (drive/UNC/separator) for SetLink2()
     LinkPath.DeleteFrontal(n);
   }
 }

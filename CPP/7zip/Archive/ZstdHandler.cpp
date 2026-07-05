@@ -4,10 +4,10 @@
 
 #include "../../../C/CpuArch.h"
 #include "../../Common/ComTry.h"
-#include "../../Common/Defs.h"
 
 #include "../Common/ProgressUtils.h"
 #include "../Common/RegisterArc.h"
+#include "../Common/StreamObjects.h"
 #include "../Common/StreamUtils.h"
 
 #include "../Compress/ZstdDecoder.h"
@@ -16,14 +16,16 @@
 
 #include "Common/DummyOutStream.h"
 #include "Common/HandlerOut.h"
+#include "Common/TarPrefixCheck.h"
 
 using namespace NWindows;
 
 namespace NArchive {
 namespace NZSTD {
 
-Z7_CLASS_IMP_CHandler_IInArchive_3(
+Z7_CLASS_IMP_CHandler_IInArchive_4(
   IArchiveOpenSeq,
+  IInArchiveGetStream,
   IOutArchive,
   ISetProperties
 )
@@ -58,8 +60,12 @@ static const Byte kArcProps[] =
 IMP_IInArchive_Props
 IMP_IInArchive_ArcProps
 
-Z7_COM7F_IMF(CHandler::GetArchiveProperty(PROPID /*propID*/, PROPVARIANT * /*value*/))
+Z7_COM7F_IMF(CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value))
 {
+  NCOM::CPropVariant prop;
+  if (propID == kpidMainSubfile && _isArc)
+    prop = (UInt32)0;
+  prop.Detach(value);
   return S_OK;
 }
 
@@ -79,6 +85,72 @@ Z7_COM7F_IMF(CHandler::GetProperty(UInt32 /* index */, PROPID propID, PROPVARIAN
   }
   prop.Detach(value);
   return S_OK;
+}
+
+Z7_COM7F_IMF(CHandler::GetStream(UInt32 index, ISequentialInStream **stream))
+{
+  COM_TRY_BEGIN
+  *stream = NULL;
+  if (index != 0)
+    return E_INVALIDARG;
+  if (!_stream)
+    return S_FALSE;
+
+  RINOK(_stream->Seek(0, STREAM_SEEK_SET, NULL))
+
+  CDynBufSeqOutStream *dynStreamSpec = new CDynBufSeqOutStream;
+  CMyComPtr<ISequentialOutStream> dynStream = dynStreamSpec;
+  dynStreamSpec->Init();
+
+  CTarPrefixCheckProgress *checkSpec = new CTarPrefixCheckProgress;
+  CMyComPtr<ICompressProgressInfo> check = checkSpec;
+  checkSpec->Buf = dynStreamSpec;
+
+  NCompress::NZSTD::CDecoder *decoderSpec = new NCompress::NZSTD::CDecoder;
+  CMyComPtr<ICompressCoder> decoder = decoderSpec;
+  decoderSpec->SetInStream(_stream);
+
+  UInt64 packSize = 0;
+  UInt64 unpackedSize = 0;
+  HRESULT result = S_OK;
+
+  for (;;)
+  {
+    result = decoderSpec->CodeResume(dynStream, &unpackedSize, check);
+    const UInt64 streamSize = decoderSpec->GetInputProcessedSize();
+
+    if (result != S_FALSE && result != S_OK)
+      break;
+    if (unpackedSize == 0)
+      break;
+    if (checkSpec->TarCheck == k_IsArc_Res_NO)
+      break;
+    if (streamSize == packSize)
+    {
+      result = S_OK;
+      break;
+    }
+    if (packSize > streamSize)
+    {
+      result = E_FAIL;
+      break;
+    }
+    if (result != S_OK)
+      break;
+  }
+
+  decoderSpec->ReleaseInStream();
+  RINOK(_stream->Seek(0, STREAM_SEEK_SET, NULL))
+
+  checkSpec->FinalCheck();
+  if (checkSpec->TarCheck != k_IsArc_Res_YES)
+    return S_FALSE;
+  if (result != S_OK || !_isArc)
+    return S_FALSE;
+
+  Create_BufInStream_WithNewBuffer(dynStreamSpec->GetBuffer(), dynStreamSpec->GetSize(), stream);
+  return S_OK;
+  COM_TRY_END
 }
 
 static const unsigned kSignatureCheckSize = 4;

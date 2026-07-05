@@ -26,6 +26,8 @@
 
 #include "Common/HandlerOut.h"
 
+#include "Tar/TarIn.h"
+
 using namespace NWindows;
 
 namespace NArchive {
@@ -382,8 +384,7 @@ Z7_COM7F_IMF(CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value))
 
     case kpidMainSubfile:
     {
-      // debug only, comment it:
-      // if (_blocks) prop = (UInt32)0;
+      if (_blocks) prop = (UInt32)0;
       break;
     }
     default: break;
@@ -978,7 +979,7 @@ Z7_COM7F_IMF(CHandler::GetStream(UInt32 index, ISequentialInStream **stream))
       return S_FALSE;
   }
 
-  CMyComPtr2<ISequentialInStream, CInStream> spec;
+  CMyComPtr2<IInStream, CInStream> spec;
   spec.Create_if_Empty();
   spec->_cache.Alloc((size_t)_maxBlocksSize);
   spec->_handlerSpec.SetFromCls(this);
@@ -986,9 +987,24 @@ Z7_COM7F_IMF(CHandler::GetStream(UInt32 index, ISequentialInStream **stream))
   spec->Size = _stat.OutSize;
   spec->InitAndSeek();
 
+  {
+    // confirm the content is actually a tar (used by CArchiveLink recursive
+    // open, see Is_TarDialect_ArcName() in Main.cpp) before
+    // exposing it -- otherwise a plain non-tar .xz whose content happens to
+    // resemble another archive format would get silently unpacked as that
+    // format instead of extracted as the single decompressed file.
+    Byte buf[512];
+    UInt32 processed = 0;
+    if (spec.Interface()->Read(buf, sizeof(buf), &processed) != S_OK)
+      return S_FALSE;
+    if (NArchive::NTar::IsArc_Tar(buf, processed) != k_IsArc_Res_YES)
+      return S_FALSE;
+    RINOK(spec.Interface()->Seek(0, STREAM_SEEK_SET, NULL))
+  }
+
   *stream = spec.Detach();
   return S_OK;
-  
+
   COM_TRY_END
 }
 

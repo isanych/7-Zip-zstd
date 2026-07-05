@@ -24,6 +24,7 @@
 #include "Common/HandlerOut.h"
 #include "Common/InStreamWithCRC.h"
 #include "Common/OutStreamWithCRC.h"
+#include "Common/TarPrefixCheck.h"
 
 #define Get32(p) GetUi32(p)
 
@@ -446,8 +447,9 @@ HRESULT CItem::WriteFooter(ISequentialOutStream *stream)
   return WriteStream(stream, buf, 8);
 }
 
-Z7_CLASS_IMP_CHandler_IInArchive_3(
+Z7_CLASS_IMP_CHandler_IInArchive_4(
   IArchiveOpenSeq,
+  IInArchiveGetStream,
   IOutArchive,
   ISetProperties
 )
@@ -515,6 +517,7 @@ Z7_COM7F_IMF(CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value))
     case kpidUnpackSize: if (_unpackSize_Defined) prop = _unpackSize; break;
     case kpidNumStreams: if (_numStreams_Defined) prop = _numStreams; break;
     case kpidHeadersSize: if (_headerSize != 0) prop = _headerSize; break;
+    case kpidMainSubfile: if (_isArc) prop = (UInt32)0; break;
     case kpidErrorFlags:
     {
       UInt32 v = 0;
@@ -667,6 +670,58 @@ Z7_COM7F_IMF(CHandler::Close())
   if (_decoder)
     _decoder->ReleaseInStream();
   return S_OK;
+}
+
+Z7_COM7F_IMF(CHandler::GetStream(UInt32 index, ISequentialInStream **stream))
+{
+  COM_TRY_BEGIN
+  *stream = NULL;
+  if (index != 0)
+    return E_INVALIDARG;
+  if (!_stream)
+    return S_FALSE;
+
+  RINOK(InStream_SeekToBegin(_stream))
+  CreateDecoder();
+  _decoder->InitInStream(true);
+
+  CItem item;
+  HRESULT result = item.ReadHeader(_decoder.ClsPtr());
+  if (result != S_OK || _decoder->InputEofError())
+  {
+    RINOK(InStream_SeekToBegin(_stream))
+    return S_FALSE;
+  }
+
+  CDynBufSeqOutStream *dynStreamSpec = new CDynBufSeqOutStream;
+  CMyComPtr<ISequentialOutStream> dynStream = dynStreamSpec;
+  dynStreamSpec->Init();
+
+  CTarPrefixCheckProgress *checkSpec = new CTarPrefixCheckProgress;
+  CMyComPtr<ICompressProgressInfo> check = checkSpec;
+  checkSpec->Buf = dynStreamSpec;
+
+  // only the first gzip member is decoded here -- enough to expose a
+  // one-member tar.gz (the overwhelmingly common case) for the recursive
+  // sub-archive open; a rare multi-member concatenated file just falls
+  // back to the old single-file view (S_FALSE below), same as before.
+  result = _decoder->CodeResume(dynStream, NULL, check);
+  checkSpec->FinalCheck();
+
+  // do NOT release the decoder's input stream here: Extract() reuses this
+  // same _decoder later and expects it to still own its input stream
+  // (only Close() releases it) -- doing so here previously corrupted state
+  // for the fallback (non-chained) extraction path.
+  RINOK(InStream_SeekToBegin(_stream))
+
+  if (checkSpec->TarCheck != k_IsArc_Res_YES)
+    return S_FALSE;
+  if (result != S_OK && result != S_FALSE)
+    return S_FALSE;
+
+  Create_BufInStream_WithNewBuffer(dynStreamSpec->GetBuffer(), dynStreamSpec->GetSize(), stream);
+  return S_OK;
+  COM_TRY_END
 }
 
 Z7_COM7F_IMF(CHandler::Extract(const UInt32 *indices, UInt32 numItems,

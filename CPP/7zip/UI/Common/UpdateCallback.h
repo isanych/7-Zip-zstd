@@ -126,6 +126,7 @@ public:
   bool StoreNtSecurity;
   bool StoreHardLinks;
   bool StoreSymLinks;
+  bool PreserveAbsoluteSymLinks;
 
   bool StoreOwnerId;
   bool StoreOwnerName;

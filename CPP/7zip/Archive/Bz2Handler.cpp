@@ -14,14 +14,16 @@
 
 #include "Common/DummyOutStream.h"
 #include "Common/HandlerOut.h"
+#include "Common/TarPrefixCheck.h"
 
 using namespace NWindows;
 
 namespace NArchive {
 namespace NBz2 {
 
-Z7_CLASS_IMP_CHandler_IInArchive_3(
+Z7_CLASS_IMP_CHandler_IInArchive_4(
   IArchiveOpenSeq,
+  IInArchiveGetStream,
   IOutArchive,
   ISetProperties
 )
@@ -70,6 +72,7 @@ Z7_COM7F_IMF(CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value))
     case kpidUnpackSize: if (_unpackSize_Defined) prop = _unpackSize; break;
     case kpidNumStreams: if (_numStreams_Defined) prop = _numStreams; break;
     case kpidNumBlocks: if (_numBlocks_Defined) prop = _numBlocks; break;
+    case kpidMainSubfile: if (_isArc) prop = (UInt32)0; break;
     case kpidErrorFlags:
     {
       UInt32 v = 0;
@@ -167,6 +170,43 @@ Z7_COM7F_IMF(CHandler::Close())
   return S_OK;
 }
 
+Z7_COM7F_IMF(CHandler::GetStream(UInt32 index, ISequentialInStream **stream))
+{
+  COM_TRY_BEGIN
+  *stream = NULL;
+  if (index != 0)
+    return E_INVALIDARG;
+  if (!_stream)
+    return S_FALSE;
+
+  RINOK(InStream_SeekToBegin(_stream))
+
+  CDynBufSeqOutStream *dynStreamSpec = new CDynBufSeqOutStream;
+  CMyComPtr<ISequentialOutStream> dynStream = dynStreamSpec;
+  dynStreamSpec->Init();
+
+  CTarPrefixCheckProgress *checkSpec = new CTarPrefixCheckProgress;
+  CMyComPtr<ICompressProgressInfo> check = checkSpec;
+  checkSpec->Buf = dynStreamSpec;
+
+  CMyComPtr2_Create<ICompressCoder, NCompress::NBZip2::CDecoder> decoder;
+  decoder->FinishMode = true;
+  decoder->Base.DecodeAllStreams = true;
+
+  HRESULT result = decoder.Interface()->Code(_stream, dynStream, NULL, NULL, check);
+  checkSpec->FinalCheck();
+
+  RINOK(InStream_SeekToBegin(_stream))
+
+  if (checkSpec->TarCheck != k_IsArc_Res_YES)
+    return S_FALSE;
+  if (result != S_OK && result != S_FALSE)
+    return S_FALSE;
+
+  Create_BufInStream_WithNewBuffer(dynStreamSpec->GetBuffer(), dynStreamSpec->GetSize(), stream);
+  return S_OK;
+  COM_TRY_END
+}
 
 Z7_COM7F_IMF(CHandler::Extract(const UInt32 *indices, UInt32 numItems,
     Int32 testMode, IArchiveExtractCallback *extractCallback))

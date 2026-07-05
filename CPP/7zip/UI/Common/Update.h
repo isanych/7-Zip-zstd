@@ -100,6 +100,10 @@ struct CUpdateOptions
   CBoolPair AltStreams;
   CBoolPair HardLinks;
   CBoolPair SymLinks;
+  // store absolute symlink targets literally instead of rebasing them
+  // relative to their own location on disk (see the kpidSymLink property
+  // getter in UpdateCallback.cpp)
+  bool SymLinks_PreserveAbsolute;
 
   CBoolPair StoreOwnerId;
   CBoolPair StoreOwnerName;
@@ -141,6 +145,7 @@ struct CUpdateOptions
     DeleteAfterCompressing(false),
     SetArcMTime(false),
     RenameMode(false),
+    SymLinks_PreserveAbsolute(false),
 
     ArcNameMode(k_ArcNameMode_Smart),
     PathMode(NWildcard::k_RelatPath)
