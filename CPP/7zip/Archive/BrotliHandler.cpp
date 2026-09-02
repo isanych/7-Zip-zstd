@@ -10,6 +10,7 @@
 
 #include "../Common/ProgressUtils.h"
 #include "../Common/RegisterArc.h"
+#include "../Common/StreamObjects.h"
 #include "../Common/StreamUtils.h"
 
 #include "../Compress/BrotliDecoder.h"
@@ -18,14 +19,16 @@
 
 #include "Common/DummyOutStream.h"
 #include "Common/HandlerOut.h"
+#include "Common/TarPrefixCheck.h"
 
 using namespace NWindows;
 
 namespace NArchive {
 namespace NBROTLI {
 
-Z7_CLASS_IMP_CHandler_IInArchive_3(
+Z7_CLASS_IMP_CHandler_IInArchive_4(
   IArchiveOpenSeq,
+  IInArchiveGetStream,
   IOutArchive,
   ISetProperties
 )
@@ -60,8 +63,12 @@ static const Byte kArcProps[] =
 IMP_IInArchive_Props
 IMP_IInArchive_ArcProps
 
-Z7_COM7F_IMF(CHandler::GetArchiveProperty(PROPID /*propID*/, PROPVARIANT * /*value*/))
+Z7_COM7F_IMF(CHandler::GetArchiveProperty(PROPID propID, PROPVARIANT *value))
 {
+  NCOM::CPropVariant prop;
+  if (propID == kpidMainSubfile && _isArc)
+    prop = (UInt32)0;
+  prop.Detach(value);
   return S_OK;
 }
 
@@ -162,6 +169,75 @@ Z7_COM7F_IMF(CHandler::Close())
   _seqStream.Release();
   _stream.Release();
   return S_OK;
+}
+
+Z7_COM7F_IMF(CHandler::GetStream(UInt32 index, ISequentialInStream **stream))
+{
+  COM_TRY_BEGIN
+  *stream = NULL;
+  if (index != 0)
+    return E_INVALIDARG;
+  if (!_stream)
+    return S_FALSE;
+
+  RINOK(_stream->Seek(0, STREAM_SEEK_SET, NULL))
+
+  CDynBufSeqOutStream *dynStreamSpec = new CDynBufSeqOutStream;
+  CMyComPtr<ISequentialOutStream> dynStream = dynStreamSpec;
+  dynStreamSpec->Init();
+
+  CTarPrefixCheckProgress *checkSpec = new CTarPrefixCheckProgress;
+  CMyComPtr<ICompressProgressInfo> check = checkSpec;
+  checkSpec->Buf = dynStreamSpec;
+
+  NCompress::NBROTLI::CDecoder *decoderSpec = new NCompress::NBROTLI::CDecoder;
+  CMyComPtr<ICompressCoder> decoder = decoderSpec;
+  decoderSpec->_numThreads_WasForced = _props._numThreads_WasForced ? 1 : 0;
+  if (_props._numThreads_WasForced)
+    decoderSpec->SetNumberOfThreads(_props._numThreads);
+  decoderSpec->SetInStream(_stream);
+
+  UInt64 packSize = 0;
+  UInt64 unpackedSize = 0;
+  HRESULT result = S_OK;
+
+  for (;;)
+  {
+    result = decoderSpec->CodeResume(dynStream, &unpackedSize, check);
+    const UInt64 streamSize = decoderSpec->GetInputProcessedSize();
+
+    if (result != S_FALSE && result != S_OK)
+      break;
+    if (unpackedSize == 0)
+      break;
+    if (checkSpec->TarCheck == k_IsArc_Res_NO)
+      break;
+    if (streamSize == packSize)
+    {
+      result = S_OK;
+      break;
+    }
+    if (packSize > streamSize)
+    {
+      result = E_FAIL;
+      break;
+    }
+    if (result != S_OK)
+      break;
+  }
+
+  decoderSpec->ReleaseInStream();
+  RINOK(_stream->Seek(0, STREAM_SEEK_SET, NULL))
+
+  checkSpec->FinalCheck();
+  if (checkSpec->TarCheck != k_IsArc_Res_YES)
+    return S_FALSE;
+  if (result != S_OK || !_isArc)
+    return S_FALSE;
+
+  Create_BufInStream_WithNewBuffer(dynStreamSpec->GetBuffer(), dynStreamSpec->GetSize(), stream);
+  return S_OK;
+  COM_TRY_END
 }
 
 Z7_COM7F_IMF(CHandler::Extract(const UInt32 *indices, UInt32 numItems,
@@ -377,7 +453,7 @@ Z7_COM7F_IMF(CHandler::SetProperties(const wchar_t * const *names, const PROPVAR
 IMP_CreateArcIn
 IMP_CreateArcOut
 REGISTER_ARC_R(
-  "brotli", "br brotli tbr", 0, 0x1F,
+  "brotli", "br brotli tbr", "* * .tar", 0x1F,
   0, NULL,
   0,
   NArcInfoFlags::kKeepName | NArcInfoFlags::kPureStartOpen | NArcInfoFlags::kByExtOnlyOpen,

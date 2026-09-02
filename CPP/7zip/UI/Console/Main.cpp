@@ -847,6 +847,7 @@ static bool Is_TarDialect_ArcName(const UString &arcPath)
     ".tgz", ".tar.gz",                            // gzip
     ".tbz2", ".tbz", ".tar.bz2",                  // bzip2
     ".txz", ".tar.xz",                            // xz
+    ".tbr", ".tar.br",                            // brotli
   };
   for (unsigned i = 0; i < Z7_ARRAY_SIZE(kSuffixes); i++)
     if (ArcPath_EndsWith_NoCase(arcPath, kSuffixes[i]))
